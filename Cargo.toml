@@ -16,8 +16,7 @@ iced = { version = "0.14.0", features = ["canvas", "smol", "image"] }
 iced_layershell = "0.14.0-beta3"
 clap = { version = "4", features = ["derive"] }
 rand = "0.10.0-rc.5"
-hyprland = "0.4.0-beta.3"
-tokio = { version = "1", features = ["rt", "sync"] }
+serde_json = "1"
 hyprlang = { version = "0.3.0", features = ["mutation"] }
 notify = "8.2.0"
 
