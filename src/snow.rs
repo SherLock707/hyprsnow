@@ -9,6 +9,7 @@ use iced::widget::canvas::{self, Canvas, Frame, Geometry, Path};
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Subscription, Task, Theme};
 use iced_layershell::to_layer_message;
 use rand::Rng;
+use std::collections::HashMap;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -19,6 +20,8 @@ enum SnowState {
         melt_timer: f32,
         window_addr: Option<String>,
         offset_x: f32,
+        // How deep the pile was where it landed: it rests on top of the snow already there.
+        depth: f32,
     },
 }
 
@@ -87,6 +90,54 @@ pub struct Waysnow {
     config: SnowConfig,
     cache: canvas::Cache,
     cached_images: Vec<ImageHandle>,
+    // Snow piled on each window's top edge: depth per PILE_COL-wide column, keyed by window address.
+    piles: HashMap<String, Pile>,
+}
+
+const PILE_COL: f32 = 4.0;
+const GROUND: &str = "ground"; // the screen's bottom edge, piled like a window top
+const PILE_MAX: f32 = 24.0;
+const WINDOW_MELT: f32 = 20.0;
+const GROUND_MELT: f32 = 4.0;
+
+struct Pile {
+    x: f32,
+    y: f32,
+    width: f32,
+    cols: Vec<f32>,
+}
+
+impl Pile {
+    fn new(x: f32, y: f32, width: f32) -> Self {
+        Self { x, y, width, cols: vec![0.0; (width / PILE_COL).ceil().max(1.0) as usize] }
+    }
+
+    fn col(&self, offset_x: f32) -> usize {
+        ((offset_x / PILE_COL) as usize).min(self.cols.len() - 1)
+    }
+
+    // A landed flake raises its column most and its neighbours a little, so piles grow as soft mounds.
+    fn add(&mut self, offset_x: f32, radius: f32) {
+        let c = self.col(offset_x);
+        let n = self.cols.len();
+        for (i, share) in [(c as isize - 1, 0.45), (c as isize, 1.0), (c as isize + 1, 0.45)] {
+            if i >= 0 && (i as usize) < n {
+                let v = &mut self.cols[i as usize];
+                *v = (*v + radius * 1.1 * share).min(PILE_MAX);
+            }
+        }
+    }
+
+    fn remove(&mut self, offset_x: f32, radius: f32) {
+        let c = self.col(offset_x);
+        let n = self.cols.len();
+        for (i, share) in [(c as isize - 1, 0.45), (c as isize, 1.0), (c as isize + 1, 0.45)] {
+            if i >= 0 && (i as usize) < n {
+                let v = &mut self.cols[i as usize];
+                *v = (*v - radius * 1.1 * share).max(0.0);
+            }
+        }
+    }
 }
 
 impl Waysnow {
@@ -196,6 +247,7 @@ pub fn boot(config: SnowConfig) -> (Waysnow, Task<Message>) {
             config,
             cache: canvas::Cache::default(),
             cached_images,
+            piles: HashMap::new(),
         },
         Task::none(),
     )
@@ -213,6 +265,11 @@ pub fn update(state: &mut Waysnow, message: Message) -> Task<Message> {
             while let Ok(_event) = state.event_rx.try_recv() {
                 state.windows = get_hyprland_windows();
                 state.monitors = get_monitors_with_fullscreen_state();
+                let windows = &state.windows;
+                state.piles.retain(|addr, p| {
+                    addr == GROUND
+                        || windows.iter().any(|w| &w.address == addr && w.x == p.x && w.y == p.y && w.width == p.width)
+                });
             }
 
             // Check for config changes (non-blocking)
@@ -221,7 +278,6 @@ pub fn update(state: &mut Waysnow, message: Message) -> Task<Message> {
             }
 
             let mut rng = rand::rng();
-            let melt_duration = 4.0;
             let valid_x_ranges = state.get_valid_spawn_ranges();
 
             for flake in &mut state.snowflakes {
@@ -240,41 +296,58 @@ pub fn update(state: &mut Waysnow, message: Message) -> Task<Message> {
                         let mut landed = false;
 
                         for window in &state.windows {
-                            if flake.x >= window.x
-                                && flake.x <= window.x + window.width
-                                && flake_bottom >= window.y
-                                && flake.y < window.y + 10.0
-                            {
-                                flake.y = window.y - flake.radius;
+                            if flake.x < window.x || flake.x > window.x + window.width {
+                                continue;
+                            }
+                            let offset_x = flake.x - window.x;
+                            let pile = state
+                                .piles
+                                .entry(window.address.clone())
+                                .or_insert_with(|| Pile::new(window.x, window.y, window.width));
+                            let depth = pile.cols[pile.col(offset_x)];
+                            let top = window.y - depth;
+                            if flake_bottom >= top && flake.y < window.y + 10.0 {
+                                flake.y = top - flake.radius;
+                                pile.add(offset_x, flake.radius);
                                 flake.state = SnowState::Landed {
                                     melt_timer: 0.0,
                                     window_addr: Some(window.address.clone()),
-                                    offset_x: flake.x - window.x,
+                                    offset_x,
+                                    depth,
                                 };
                                 landed = true;
                                 break;
                             }
                         }
 
-                        if !landed && flake.y > state.height - flake.radius {
-                            flake.y = state.height - flake.radius;
-                            flake.state = SnowState::Landed {
-                                melt_timer: 0.0,
-                                window_addr: None,
-                                offset_x: 0.0,
-                            };
+                        if !landed {
+                            let (w, h) = (state.width, state.height);
+                            let pile = state.piles.entry(GROUND.to_string()).or_insert_with(|| Pile::new(0.0, h, w));
+                            let depth = pile.cols[pile.col(flake.x)];
+                            if flake_bottom >= h - depth {
+                                flake.y = h - depth - flake.radius;
+                                pile.add(flake.x, flake.radius);
+                                flake.state = SnowState::Landed {
+                                    melt_timer: 0.0,
+                                    window_addr: Some(GROUND.to_string()),
+                                    offset_x: flake.x,
+                                    depth,
+                                };
+                            }
                         }
                     }
                     SnowState::Landed {
                         melt_timer,
                         window_addr,
                         offset_x,
+                        depth,
                     } => {
-                        if let Some(addr) = window_addr {
+                        let melt_duration = if window_addr.is_some() { WINDOW_MELT } else { GROUND_MELT };
+                        if let Some(addr) = window_addr.as_ref().filter(|a| a.as_str() != GROUND) {
                             if let Some(window) =
                                 state.windows.iter().find(|w| &w.address == addr)
                             {
-                                let expected_y = window.y - flake.radius;
+                                let expected_y = window.y - *depth - flake.radius;
 
                                 if (flake.y - expected_y).abs() > 1.0
                                     || *offset_x < 0.0
@@ -292,10 +365,14 @@ pub fn update(state: &mut Waysnow, message: Message) -> Task<Message> {
                         }
 
                         *melt_timer += dt;
-                        let melt_progress = *melt_timer / melt_duration;
+                        // Solid while it rests, fading over the last GROUND_MELT seconds.
+                        let melt_progress = ((*melt_timer - (melt_duration - GROUND_MELT)) / GROUND_MELT).max(0.0);
                         flake.opacity = (1.0 - melt_progress).max(0.0) * 0.9 * state.config.max_opacity;
 
                         if *melt_timer >= melt_duration {
+                            if let Some(pile) = window_addr.as_ref().and_then(|a| state.piles.get_mut(a)) {
+                                pile.remove(*offset_x, flake.radius);
+                            }
                             flake.reset(state.width, state.height, &state.config, &mut rng);
                             if !valid_x_ranges.is_empty() {
                                 let range = &valid_x_ranges[rng.random_range(0..valid_x_ranges.len())];
@@ -339,6 +416,27 @@ impl canvas::Program<Message> for &Waysnow {
         _cursor: Cursor,
     ) -> Vec<Geometry> {
         let geometry = self.cache.draw(renderer, bounds.size(), |frame: &mut Frame| {
+            // Snow caps: the piles as soft mounds along window tops and the bottom edge, flakes on top.
+            let cap = Color { r: 1.0, g: 1.0, b: 1.0, a: 0.88 * self.config.max_opacity };
+            for pile in self.piles.values() {
+                if pile.cols.iter().all(|&d| d < 0.5) || self.is_in_fullscreen_monitor(pile.x + pile.width / 2.0, pile.y - 1.0) {
+                    continue;
+                }
+                let path = Path::new(|b| {
+                    b.move_to(Point::new(pile.x, pile.y));
+                    let mut prev = Point::new(pile.x, pile.y - pile.cols[0]);
+                    b.line_to(prev);
+                    for (i, &d) in pile.cols.iter().enumerate().skip(1) {
+                        let p = Point::new((pile.x + i as f32 * PILE_COL).min(pile.x + pile.width), pile.y - d);
+                        b.quadratic_curve_to(prev, Point::new((prev.x + p.x) / 2.0, (prev.y + p.y) / 2.0));
+                        prev = p;
+                    }
+                    b.line_to(Point::new(pile.x + pile.width, prev.y));
+                    b.line_to(Point::new(pile.x + pile.width, pile.y));
+                    b.close();
+                });
+                frame.fill(&path, cap);
+            }
             for flake in &self.snowflakes {
                 if self.is_in_fullscreen_monitor(flake.x, flake.y) {
                     continue;
