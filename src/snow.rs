@@ -96,20 +96,19 @@ pub struct Waysnow {
 
 const PILE_COL: f32 = 4.0;
 const GROUND: &str = "ground"; // the screen's bottom edge, piled like a window top
-const PILE_MAX: f32 = 24.0;
-const WINDOW_MELT: f32 = 20.0;
-const GROUND_MELT: f32 = 4.0;
+const GROUND_MELT: f32 = 4.0; // unpiled snow, and the fade at the end of piled snow
 
 struct Pile {
     x: f32,
     y: f32,
     width: f32,
+    max: f32, // 0 = this surface doesn't pile
     cols: Vec<f32>,
 }
 
 impl Pile {
-    fn new(x: f32, y: f32, width: f32) -> Self {
-        Self { x, y, width, cols: vec![0.0; (width / PILE_COL).ceil().max(1.0) as usize] }
+    fn new(x: f32, y: f32, width: f32, max: f32) -> Self {
+        Self { x, y, width, max, cols: vec![0.0; (width / PILE_COL).ceil().max(1.0) as usize] }
     }
 
     fn col(&self, offset_x: f32) -> usize {
@@ -123,7 +122,7 @@ impl Pile {
         for (i, share) in [(c as isize - 1, 0.45), (c as isize, 1.0), (c as isize + 1, 0.45)] {
             if i >= 0 && (i as usize) < n {
                 let v = &mut self.cols[i as usize];
-                *v = (*v + radius * 1.1 * share).min(PILE_MAX);
+                *v = (*v + radius * 1.1 * share).min(self.max);
             }
         }
     }
@@ -172,6 +171,10 @@ impl Waysnow {
         let mut rng = rand::rng();
         let old_count = self.config.intensity as usize * 50;
         let new_count = new_config.intensity as usize * 50;
+
+        if (self.config.pile_windows, self.config.pile_ground) != (new_config.pile_windows, new_config.pile_ground) {
+            self.piles.clear();
+        }
 
         if self.config.image_paths != new_config.image_paths {
             self.cached_images.clear();
@@ -303,7 +306,7 @@ pub fn update(state: &mut Waysnow, message: Message) -> Task<Message> {
                             let pile = state
                                 .piles
                                 .entry(window.address.clone())
-                                .or_insert_with(|| Pile::new(window.x, window.y, window.width));
+                                .or_insert_with(|| Pile::new(window.x, window.y, window.width, state.config.pile_windows));
                             let depth = pile.cols[pile.col(offset_x)];
                             let top = window.y - depth;
                             if flake_bottom >= top && flake.y < window.y + 10.0 {
@@ -322,7 +325,8 @@ pub fn update(state: &mut Waysnow, message: Message) -> Task<Message> {
 
                         if !landed {
                             let (w, h) = (state.width, state.height);
-                            let pile = state.piles.entry(GROUND.to_string()).or_insert_with(|| Pile::new(0.0, h, w));
+                            let max = state.config.pile_ground;
+                            let pile = state.piles.entry(GROUND.to_string()).or_insert_with(|| Pile::new(0.0, h, w, max));
                             let depth = pile.cols[pile.col(flake.x)];
                             if flake_bottom >= h - depth {
                                 flake.y = h - depth - flake.radius;
@@ -342,7 +346,12 @@ pub fn update(state: &mut Waysnow, message: Message) -> Task<Message> {
                         offset_x,
                         depth,
                     } => {
-                        let melt_duration = if window_addr.is_some() { WINDOW_MELT } else { GROUND_MELT };
+                        let piled = match window_addr.as_deref() {
+                            Some(GROUND) => state.config.pile_ground > 0.0,
+                            Some(_) => state.config.pile_windows > 0.0,
+                            None => false,
+                        };
+                        let melt_duration = if piled { state.config.pile_seconds.max(GROUND_MELT) } else { GROUND_MELT };
                         if let Some(addr) = window_addr.as_ref().filter(|a| a.as_str() != GROUND) {
                             if let Some(window) =
                                 state.windows.iter().find(|w| &w.address == addr)

@@ -32,6 +32,18 @@ pub struct Args {
     #[arg(long)]
     pub max_opacity: Option<f32>,
 
+    /// Highest snow pile on window tops in pixels (0 = no piling)
+    #[arg(long)]
+    pub pile_windows: Option<f32>,
+
+    /// Highest snow pile along the screen bottom in pixels (0 = no piling)
+    #[arg(long)]
+    pub pile_ground: Option<f32>,
+
+    /// Seconds piled snow lasts before it melts
+    #[arg(long)]
+    pub pile_seconds: Option<f32>,
+
     /// Path to custom snowflake image
     /// If not provided, default circle shape will be used
     /// Make sure the image has a transparent background (e.g., PNG format)

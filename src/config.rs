@@ -14,6 +14,9 @@ pub struct SnowConfig {
     pub speed_max: f32,
     pub drift: f32,
     pub max_opacity: f32,
+    pub pile_windows: f32,
+    pub pile_ground: f32,
+    pub pile_seconds: f32,
     pub image_paths: Option<Vec<String>>,
 }
 
@@ -32,6 +35,9 @@ impl Default for SnowConfig {
             speed_max: 80.0,
             drift: 20.0,
             max_opacity: 1.0,
+            pile_windows: 24.0,
+            pile_ground: 24.0,
+            pile_seconds: 20.0,
             image_paths: None,
         }
     }
@@ -99,6 +105,9 @@ pub fn load_config() -> SnowConfig {
             .get_float("general:max_opacity")
             .map(|v| (v as f32).clamp(0.0, 1.0))
             .unwrap_or(1.0),
+        pile_windows: config.get_float("general:pile_windows").map(|v| (v as f32).max(0.0)).unwrap_or(24.0),
+        pile_ground: config.get_float("general:pile_ground").map(|v| (v as f32).max(0.0)).unwrap_or(24.0),
+        pile_seconds: config.get_float("general:pile_seconds").map(|v| (v as f32).max(1.0)).unwrap_or(20.0),
         image_paths: config
             .get_handler_calls("general:image_path")
             .filter(|v| !v.is_empty())
@@ -127,6 +136,15 @@ pub fn apply_cli_overrides(config: &mut SnowConfig, args: &Args) {
     }
     if let Some(v) = args.max_opacity {
         config.max_opacity = v.clamp(0.0, 1.0);
+    }
+    if let Some(v) = args.pile_windows {
+        config.pile_windows = v.max(0.0);
+    }
+    if let Some(v) = args.pile_ground {
+        config.pile_ground = v.max(0.0);
+    }
+    if let Some(v) = args.pile_seconds {
+        config.pile_seconds = v.max(1.0);
     }
     if let Some(v) = &args.image_path {
         config.image_paths = Some(v.clone());
